@@ -1,206 +1,209 @@
+import json
 import os
 import time
-import mimetypes
 from pathlib import Path
-from datetime import datetime
 
 REQUEST_FILE = "read_request.txt"
 RESPONSE_FILE = "read_response.txt"
 
-# Change this to your media library location
-SEARCH_DIRECTORY = "."
+# Directory containing the user JSON files.
+SAVE_DIRECTORY = Path(".")
 
 
-def parse_request(filepath):
+def parse_request(file_path):
+    """Read key=value pairs from the request file."""
     request = {}
-    with open(filepath, "r") as file:
-        for line in file:
-            line = line.strip()
-            if "=" in line:
-                key, value = line.split("=", 1)
-                request[key] = value
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    request[key.strip()] = value.strip()
+
+    except OSError as error:
+        print(f"Error reading request file: {error}")
 
     return request
 
+#Response====================================================
 
-def determine_media_type(path):
-    mime, _ = mimetypes.guess_type(path)
+def write_response(data):
+    """Write a response dictionary to the response file."""
+    try:
+        with open(RESPONSE_FILE, "w", encoding="utf-8") as file:
+            for key, value in data.items():
 
-    if mime is None:
-        return "other"
+                # JSON-encode complex values so they can safely
+                # travel through the text-file communication pipe.
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value)
 
-    if mime.startswith("image"):
-        return "image"
+                file.write(f"{key}={value}\n")
 
-    if mime.startswith("video"):
-        return "video"
-
-    if mime.startswith("audio"):
-        return "audio"
-
-    if mime.startswith("text"):
-        return "text"
-
-    if mime == "application/pdf":
-        return "pdf"
-
-    if "zip" in mime:
-        return "archive"
-
-    return "other"
+    except OSError as error:
+        print(f"Error writing response file: {error}")
 
 
-def get_metadata(filename):
-    path = Path(filename)
+def get_user_file_path(username, file_name):
+    """
+    Build the path to a user's JSON file.
+
+    Example:
+        username = "antonio"
+        file_name = "games.json"
+
+    Returns:
+        antonio_games.json
+    """
+
+    # Prevent usernames or filenames from creating
+    # directories outside SAVE_DIRECTORY.
+    username = Path(username).name
+    file_name = Path(file_name).name
+
+    return SAVE_DIRECTORY / f"{username}_{file_name}"
+
+
+def read_json_file(username, file_name):
+    """
+    Read a user's JSON file and return its contents.
+    """
+
+    path = get_user_file_path(username, file_name)
 
     if not path.exists():
         return {
             "status": "failure",
-            "message": "File not found"
+            "message": "File not found",
+            "file_name": path.name
         }
 
-    stats = path.stat()
+    if not path.is_file():
+        return {
+            "status": "failure",
+            "message": "Path is not a file",
+            "file_name": path.name
+        }
 
-    return {
-        "status": "success",
-        "file_name": path.name,
-        "file_path": str(path.resolve()),
-        "file_type": path.suffix.lower(),
-        "media_type":
-            determine_media_type(path),
-        "file_size":
-            stats.st_size,
-        "modified":
-            datetime.fromtimestamp(
-                stats.st_mtime
-            ).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-    }
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
 
+        return {
+            "status": "success",
+            "file_name": path.name,
+            "data": data
+        }
 
-def search_files(keyword):
-    results = []
+    except json.JSONDecodeError as error:
+        return {
+            "status": "failure",
+            "message": f"Invalid JSON: {error}",
+            "file_name": path.name
+        }
 
-    keyword = keyword.lower()
-    root = Path(SEARCH_DIRECTORY)
-
-    for file in root.rglob("*"):
-        if file.is_file():
-            if keyword in file.name.lower():
-                metadata = get_metadata(file)
-                results.append(metadata)
-
-    return results
+    except OSError as error:
+        return {
+            "status": "failure",
+            "message": f"Error reading file: {error}",
+            "file_name": path.name
+        }
 
 
-def write_response(data):
-    with open(RESPONSE_FILE, "w") as file:
-        for key, value in data.items():
-            file.write(
-                f"{key}={value}\n"
-            )
+def process_request():
+    """Read and process one read request."""
 
+    print("Read request found!")
 
-def build_search_response(results):
-    response = {"status": "success", "results": len(results)}
+    request = parse_request(REQUEST_FILE)
+    print(request)
 
-    index = 1
+    command = request.get("command", "READ").upper()
 
-    for item in results:
-        response[f"file{index}_name"] = (
-            item["file_name"]
-        )
-        response[f"file{index}_path"] = (
-            item["file_path"]
-        )
-        response[f"file{index}_type"] = (
-            item["file_type"]
-        )
-        response[f"file{index}_media"] = (
-            item["media_type"]
-        )
-        response[f"file{index}_size"] = (
-            item["file_size"]
-        )
-        index += 1
+    if command != "READ":
+        response = {
+            "status": "failure",
+            "message": f"Unknown command: {command}"
+        }
 
-    return response
+        write_response(response)
+        return
+
+    required_fields = (
+        "username",
+        "file_name"
+    )
+
+    if not all(field in request for field in required_fields):
+        response = {
+            "status": "failure",
+            "message": "Missing username or file_name"
+        }
+
+        write_response(response)
+        return
+
+    username = request["username"]
+    file_name = request["file_name"]
+
+    if not file_name.lower().endswith(".json"):
+        response = {
+            "status": "failure",
+            "message": "file_name must refer to a JSON file"
+        }
+
+        write_response(response)
+        return
+
+    response = read_json_file(
+        username,
+        file_name
+    )
+
+    write_response(response)
+
+    print(response)
 
 
 def main():
+    """Run the Read microservice."""
+
     print("==============================")
     print(" Read Service Running")
     print("==============================")
+    print("Watching for read_request.txt...")
 
     while True:
+
         if os.path.exists(REQUEST_FILE):
-            print("Request received")
+
             try:
-                request = parse_request(
-                    REQUEST_FILE
-                )
-                command = request.get(
-                    "command",
-                    "READ"
-                ).upper()
+                process_request()
 
+            except Exception as error:
+                print(f"Unexpected error: {error}")
 
-                if command == "READ":
-                    if "file_name" in request:
-                        response = get_metadata(
-                            request["file_name"]
-                        )
-                    else:
-                        response = {
-                            "status": "failure",
-                            "message":
-                                "Missing file_name"
-                        }
-
-
-                elif command == "SEARCH":
-                    if "keyword" in request:
-                        results = search_files(
-                            request["keyword"]
-                        )
-                        response = (
-                            build_search_response(
-                                results
-                            )
-                        )
-                    else:
-                        response = {
-                            "status": "failure",
-                            "message":
-                                "Missing keyword"
-                        }
-
-
-                else:
-                    # If command is invalid
-                    response = {
-                        "status": "failure",
-                        "message":
-                            "Unknown command"
-                    }
-
-                write_response(response)
-
-            except Exception as e:
                 write_response({
                     "status": "failure",
-                    "message": str(e)
+                    "message": str(error)
                 })
 
             finally:
+                # Remove the request so it is not processed again.
                 try:
                     os.remove(REQUEST_FILE)
+
                 except FileNotFoundError:
                     pass
+
         time.sleep(1)
 
 
 if __name__ == "__main__":
     main()
-  
