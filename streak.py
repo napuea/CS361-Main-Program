@@ -1,150 +1,256 @@
 import json
 import os
 import time
-from datetime import date, datetime
+from pathlib import Path
 
-REQUEST_FILE = "session_request.txt"
-RESPONSE_FILE = "session_response.txt"
-DATABASE_FILE = "session_db.json"
+REQUEST_FILE = "save_request.txt"
+RESPONSE_FILE = "save_response.txt"
 
-
-def load_database():
-    if not os.path.exists(DATABASE_FILE):
-        return {}
-
-    with open(DATABASE_FILE, "r") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+# Directory where the user JSON files are stored.
+# "." means the same directory as save.py.
+SAVE_DIRECTORY = Path(".")
 
 
-def save_database(db):
-    with open(DATABASE_FILE, "w") as f:
-        json.dump(db, f, indent=4)
+def print_file_contents(file_path, label):
+    """Print the contents of a text file in a readable format."""
+    try:
+        print(f"\n--- {label} ---")
 
+        with open(file_path, "r", encoding="utf-8") as file:
+            contents = file.read()
 
-def read_request():
-    if not os.path.exists(REQUEST_FILE):
-        return None
-
-    with open(REQUEST_FILE, "r") as f:
-        lines = f.readlines()
-
-    if not lines:
-        return None
-
-    request = {}
-
-    for line in lines:
-        if "=" in line:
-            key, value = line.strip().split("=", 1)
-            request[key] = value
-
-    return request
-
-
-def clear_request():
-    with open(REQUEST_FILE, "w"):
-        pass
-
-
-def write_response(data):
-    with open(RESPONSE_FILE, "w") as f:
-        for key, value in data.items():
-            f.write(f"{key}={value}\n")
-
-
-def start_session(db, username):
-    today = date.today()
-
-    if username not in db:
-        db[username] = {
-            "last_session": str(today),
-            "streak": 1
-        }
-
-    else:
-        last = datetime.strptime(
-            db[username]["last_session"],
-            "%Y-%m-%d"
-        ).date()
-
-        difference = (today - last).days
-
-        if difference == 0:
-            # Already started today
-            pass
-
-        elif difference == 1:
-            db[username]["streak"] += 1
-            db[username]["last_session"] = str(today)
-
+        if contents.strip():
+            print(contents.rstrip())
         else:
-            db[username]["streak"] = 1
-            db[username]["last_session"] = str(today)
+            print("(empty)")
 
-    save_database(db)
+        print(f"--- End {label} ---\n")
 
-    return {
-        "status": "SUCCESS",
-        "user": username,
-        "current_streak": db[username]["streak"],
-        "last_session": db[username]["last_session"]
-    }
+    except OSError as error:
+        print(f"Could not read {file_path}: {error}")
 
 
-def get_streak(db, username):
+def parse_request(file_path):
+    """Read key=value pairs from the save request file."""
+    data = {}
 
-    if username not in db:
-        return {
-            "status": "NOT_FOUND"
-        }
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
 
-    return {
-        "status": "SUCCESS",
-        "user": username,
-        "current_streak": db[username]["streak"],
-        "last_session": db[username]["last_session"]
-    }
+                if not line:
+                    continue
+
+                position = line.find("=")
+
+                if position != -1:
+                    key = line[:position].strip()
+                    value = line[position + 1:].strip()
+
+                    data[key] = value
+
+    except OSError as error:
+        print(f"Error reading request file: {error}")
+
+    return data
 
 
-def process_request(request):
+def write_response(status, file_name="", error_message=""):
+    """Write the result of the save operation."""
+    try:
+        with open(RESPONSE_FILE, "w", encoding="utf-8") as response:
+            response.write(f"status={status}\n")
 
-    db = load_database()
+            if file_name:
+                response.write(f"file_saved={file_name}\n")
 
-    command = request.get("command", "")
-    username = request.get("user", "")
+            if error_message:
+                response.write(f"error={error_message}\n")
 
-    if command == "START_SESSION":
-        response = start_session(db, username)
+        # Print the actual response file after writing it.
+        print_file_contents(
+            RESPONSE_FILE,
+            "SAVE RESPONSE"
+        )
 
-    elif command == "GET_STREAK":
-        response = get_streak(db, username)
+    except OSError as error:
+        print(f"Error writing response file: {error}")
+
+
+def get_user_file_path(username, file_name):
+    """
+    Build the path to a user's JSON file.
+
+    Example:
+        username = "antonio"
+        file_name = "games.json"
+
+    Results in:
+        antonio_games.json
+    """
+
+    # Prevent directory traversal through the username or filename.
+    username = Path(username).name
+    file_name = Path(file_name).name
+
+    return SAVE_DIRECTORY / f"{username}_{file_name}"
+
+
+def validate_json_data(data):
+    """
+    Verify that the supplied string contains valid JSON.
+
+    Returns:
+        True  - valid JSON
+        False - invalid JSON
+    """
+    try:
+        json.loads(data)
+        return True
+
+    except json.JSONDecodeError as error:
+        print(f"Invalid JSON data: {error}")
+        return False
+
+
+def save_json_file(username, file_name, data):
+    """
+    Save complete JSON data to the user's JSON file.
+
+    The data received from the client is expected to already
+    be a JSON string.
+    """
+
+    path = get_user_file_path(username, file_name)
+
+    # Make sure the data is actually valid JSON before
+    # overwriting the user's existing file.
+    try:
+        json_data = json.loads(data)
+
+    except json.JSONDecodeError as error:
+        print(f"Cannot save invalid JSON: {error}")
+        return False
+
+    try:
+        with open(path, "w", encoding="utf-8") as save_file:
+            json.dump(
+                json_data,
+                save_file,
+                indent=4
+            )
+
+            save_file.write("\n")
+
+        return True
+
+    except OSError as error:
+        print(f"Error saving JSON file: {error}")
+        return False
+
+
+def process_request():
+    """Read and process one save request."""
+
+    print("Save request found!")
+
+    # Print the actual request file before processing it.
+    print_file_contents(
+        REQUEST_FILE,
+        "SAVE REQUEST"
+    )
+
+    request = parse_request(REQUEST_FILE)
+
+    required_fields = (
+        "username",
+        "file_name",
+        "save_data"
+    )
+
+    if not all(field in request for field in required_fields):
+        print("Invalid request: missing required field.")
+
+        write_response(
+            "failure",
+            error_message="Missing required field."
+        )
+
+        return
+
+    username = request["username"]
+    file_name = request["file_name"]
+    save_data = request["save_data"]
+
+    # Make sure the filename is a JSON file.
+    if not file_name.lower().endswith(".json"):
+        print("Invalid request: file must be a JSON file.")
+
+        write_response(
+            "failure",
+            error_message="file_name must refer to a JSON file."
+        )
+
+        return
+
+    # Save the JSON.
+    if save_json_file(
+        username,
+        file_name,
+        save_data
+    ):
+        user_file_name = get_user_file_path(
+            username,
+            file_name
+        ).name
+
+        write_response(
+            "success",
+            user_file_name
+        )
+
+        print(f"Saved: {user_file_name}")
 
     else:
-        response = {
-            "status": "UNKNOWN_COMMAND"
-        }
-
-    write_response(response)
+        write_response(
+            "failure",
+            error_message="Could not save JSON data."
+        )
 
 
 def main():
+    """Run the Save microservice."""
 
-    print("Session Service Running...")
+    print("Save Service Running...")
+    print("Watching for save_request.txt...")
 
     while True:
 
-        request = read_request()
+        if os.path.exists(REQUEST_FILE):
 
-        if request:
-            process_request(request)
-            clear_request()
+            try:
+                process_request()
 
-        time.sleep(0.5)
+            except Exception as error:
+                print(f"Unexpected error: {error}")
+
+                write_response(
+                    "failure",
+                    error_message=str(error)
+                )
+
+            finally:
+                # Remove the request so it is not processed again.
+                try:
+                    os.remove(REQUEST_FILE)
+
+                except FileNotFoundError:
+                    pass
+
+        # Check for another request every second.
+        time.sleep(1)
 
 
 if __name__ == "__main__":
     main()
-  
